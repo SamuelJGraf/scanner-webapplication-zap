@@ -35,6 +35,9 @@ public class ZapTargetAttributes {
     @JsonProperty("ZAP_SITEMAP")
     private List<ZapSitemapEntry> sitemap = new LinkedList<>();
 
+    @JsonProperty("SCAN_ATTACK_STRENGTH")
+    private String scanAttackStrength;
+
     @JsonProperty("ZAP_SPIDER_MAX_DEPTH")
     private Integer spiderMaxDepth;
     @JsonProperty("ZAP_SPIDER_INCLUDE_REGEX")

@@ -37,11 +37,9 @@ import io.securecodebox.zap.service.engine.model.zap.ZapAuthenticationMethod;
 import io.securecodebox.zap.service.engine.model.zap.ZapReplacerRule;
 import io.securecodebox.zap.service.engine.model.zap.ZapSitemapEntry;
 
-import java.io.UnsupportedEncodingException;
+import java.io.*;
 import java.net.URLEncoder;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
 import javax.annotation.PostConstruct;
 
@@ -50,6 +48,7 @@ import io.securecodebox.zap.service.zap.model.ScriptEngines;
 import io.securecodebox.zap.service.zap.model.ScriptTypes;
 import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
+import org.parosproxy.paros.core.scanner.Plugin.AttackStrength;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.togglz.core.util.Strings;
@@ -81,8 +80,31 @@ public class ZapService implements StatusDetailIndicator {
     private static final String AUTH_FORM_BASED = "formBasedAuthentication";
     private static final String AUTH_SCRIPT_BASED = "scriptBasedAuthentication";
 
+    /**
+     * This map maps each constant of {@link AttackStrength} to the name of a policy which is designed
+     * to have the corresponding attack strength.
+     */
+    private static final Map<AttackStrength, String> ATTACK_STRENGTH_POLICY_NAME_MAP =
+            initAttackStrengthPolicyNameMap();
+
     private static Integer defaultDelayInMs;
     private static Integer defaultThreadsPerHost;
+
+    /**
+     * Don't use this method! Use {@link #ATTACK_STRENGTH_POLICY_NAME_MAP} instead!
+     *
+     * @return the initialized value for {@link #ATTACK_STRENGTH_POLICY_NAME_MAP}
+     */
+    private static Map<AttackStrength, String> initAttackStrengthPolicyNameMap() {
+        Map<AttackStrength, String> attackStrengthPolicyNameMap = new HashMap<>();
+        attackStrengthPolicyNameMap.put(AttackStrength.INSANE, "InsaneAttackStrengthPolicy");
+        attackStrengthPolicyNameMap.put(AttackStrength.HIGH, "HighAttackStrengthPolicy");
+        attackStrengthPolicyNameMap.put(AttackStrength.MEDIUM, "MediumAttackStrengthPolicy");
+        attackStrengthPolicyNameMap.put(AttackStrength.LOW, "LowAttackStrengthPolicy");
+        attackStrengthPolicyNameMap.put(AttackStrength.DEFAULT, "DefaultAttackStrengthPolicy");
+
+        return  attackStrengthPolicyNameMap;
+    }
 
     private final ZapConfiguration config;
     private ClientApi api;
@@ -365,18 +387,69 @@ public class ZapService implements StatusDetailIndicator {
         Integer delayInMs = attributes.getScannerDelayInMs();
         Integer threadsPerHost = attributes.getThreadsPerHost();
         ZapReplacerRule[] replacerRules = attributes.getZapReplacerRules();
+        String attackStrength = attributes.getScanAttackStrength();
 
         api.ascan.enableAllScanners(null);
         api.ascan.setOptionHandleAntiCSRFTokens(true);
         setRateLimits(delayInMs, threadsPerHost);
 
         replacerPluginConfigurator.configureZapWithReplacerRules(replacerRules);
+        String policyName = choosePolicyForAttackStrength(attackStrength);
 
         ApiResponse response = ("-1".equals(userId))
-                ? api.ascan.scan(targetUrl, "true", "false", null, null, null)
-                : api.ascan.scanAsUser(targetUrl, contextId, userId, "true", null, null, null);
+                ? api.ascan.scan(targetUrl, "true", "false", policyName, null, null)
+                : api.ascan.scanAsUser(targetUrl, contextId, userId, "true", policyName, null, null);
 
         return getSingleResult(response);
+    }
+
+    /**
+     * If attackStrengthName is set to null, this method will return null.
+     * Otherwise it returns the name of a policy whose attack strength has a given name.
+     * Especially this method ensures that the policy with the returned name exists and has the
+     * attack strength of the given name.
+     *
+     * The value of attackStrengthName must be null or the name of one of the constants of {@link AttackStrength}.
+     *
+     * @param attackStrengthName name of the attack strength of the policy with the returned name.
+     *                           Allowed values are null and the constant names of {@link AttackStrength}
+     * @return null or the name of a policy whose attack strength has a given name.
+     * @throws ClientApiException The policy of the returned name is created or updated with the ZAP API, which might
+     * lead to this exception
+     */
+    private String choosePolicyForAttackStrength(String attackStrengthName) throws ClientApiException {
+        if (attackStrengthName != null) {
+            AttackStrength attackStrength = AttackStrength.valueOf(attackStrengthName);
+            ensurePolicyForAttackStrengthIsAvailable(attackStrength);
+            return ATTACK_STRENGTH_POLICY_NAME_MAP.get(attackStrength);
+        }
+
+        return null;
+    }
+
+    /**
+     * Ensures that the policy for the given attackStrength is available with the correct attack strength.
+     * The map {@link #ATTACK_STRENGTH_POLICY_NAME_MAP} maps each {@link AttackStrength} to the name of a policy, which
+     * is supposed to have the corresponding attack strength.
+     * Consider the policy to which {@link #ATTACK_STRENGTH_POLICY_NAME_MAP} maps the given attackStrength.
+     * This method ensures that this policy exists and has the given attack strength.
+     *
+     * @param attackStrength Ensure that the policy for this attack strength is available
+     * @throws ClientApiException This method uses the Zap Api, which might lead to this exception
+     */
+    private void ensurePolicyForAttackStrengthIsAvailable(AttackStrength attackStrength) throws ClientApiException {
+        String policyName = ATTACK_STRENGTH_POLICY_NAME_MAP.get(attackStrength);
+
+        try {
+            api.ascan.addScanPolicy(policyName, null, attackStrength.toString());
+        } catch(ClientApiException clientApiException) {
+            String errorMessage = clientApiException.getMessage();
+            if ("Already Exists".equals(errorMessage)) {
+                api.ascan.updateScanPolicy(policyName, null, attackStrength.toString());
+            } else {
+                throw clientApiException;
+            }
+        }
     }
 
     private void setRateLimits(Integer delayInMs, Integer threadsPerHost) throws ClientApiException {
